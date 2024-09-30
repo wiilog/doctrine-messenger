@@ -51,6 +51,7 @@ class Connection implements ResetInterface
         'queue_name' => 'default',
         'redeliver_timeout' => 3600,
         'auto_setup' => true,
+        'unique_messages' => false,
     ];
 
     /**
@@ -104,6 +105,9 @@ class Connection implements ResetInterface
         $configuration += $query + $options + static::DEFAULT_OPTIONS;
 
         $configuration['auto_setup'] = filter_var($configuration['auto_setup'], \FILTER_VALIDATE_BOOL);
+        $configuration['unique_messages'] = filter_var($configuration['unique_messages'], \FILTER_VALIDATE_BOOL);
+
+        $configuration['table_name'] = self::getTableName($query, $options, $configuration['unique_messages']);
 
         // check for extra keys in options
         $optionsExtraKeys = array_diff(array_keys($options), array_keys(static::DEFAULT_OPTIONS));
@@ -127,34 +131,64 @@ class Connection implements ResetInterface
      *
      * @throws DBALException
      */
-    public function send(string $body, array $headers, int $delay = 0): string
+    public function send(string $body, array $headers, int $delay = 0, string $uniqueKey = null): ?string
     {
+        if (!isset($uniqueKey)
+            && $this->configuration['unique_messages'] === true) {
+            throw new TransportException('No unique key given while the unique_messages option is set to true.');
+        }
+
         $now = new \DateTimeImmutable('UTC');
         $availableAt = $now->modify(sprintf('%+d seconds', $delay / 1000));
 
-        $queryBuilder = $this->driverConnection->createQueryBuilder()
-            ->insert($this->configuration['table_name'])
-            ->values([
-                'body' => '?',
-                'headers' => '?',
-                'queue_name' => '?',
-                'created_at' => '?',
-                'available_at' => '?',
-            ]);
+        $values = [
+            'body' => '?',
+            'headers' => '?',
+            'queue_name' => '?',
+            'unique_id' => '?',
+            'created_at' => '?',
+            'available_at' => '?',
+        ];
 
-        return $this->executeInsert($queryBuilder->getSQL(), [
+        $parameters = [
             $body,
             json_encode($headers),
             $this->configuration['queue_name'],
             $now,
             $availableAt,
-        ], [
+        ];
+
+        $types = [
             Types::STRING,
             Types::STRING,
             Types::STRING,
             Types::DATETIME_IMMUTABLE,
             Types::DATETIME_IMMUTABLE,
-        ]);
+        ];
+
+        if (isset($uniqueKey)) {
+            $values['unique_key'] = '?';
+            $parameters[] = $uniqueKey;
+            $types[] = Types::STRING;
+        }
+
+        $queryBuilder = $this->driverConnection->createQueryBuilder()
+            ->insert($this->configuration['table_name'])
+            ->values($values);
+
+        return $this->executeInsert($queryBuilder->getSQL(), $parameters, $types);
+    }
+
+    private static function getTableName(array $query,
+                                         array $options,
+                                         bool  $uniqueMessages): string {
+        $configurationWithoutDefaults = $query + $options;
+
+        if (isset($configurationWithoutDefaults['table_name'])) {
+            return $configurationWithoutDefaults['table_name'];
+        }
+
+        return self::DEFAULT_OPTIONS['table_name'] . ($uniqueMessages ? '_unique' : '');
     }
 
     public function get(): ?array
@@ -450,7 +484,7 @@ class Connection implements ResetInterface
         return $stmt;
     }
 
-    private function executeInsert(string $sql, array $parameters = [], array $types = []): string
+    private function executeInsert(string $sql, array $parameters = [], array $types = []): ?string
     {
         // Use PostgreSQL RETURNING clause instead of lastInsertId() to get the
         // inserted id in one operation instead of two.
@@ -487,6 +521,10 @@ class Connection implements ResetInterface
                 $this->setup();
                 goto insert;
             }
+            else if ($e instanceof DBALException\UniqueConstraintViolationException
+                && $this->configuration['unique_messages']) {
+                return null;
+            }
 
             throw $e;
         }
@@ -517,6 +555,9 @@ class Connection implements ResetInterface
         $table->addColumn('queue_name', Types::STRING)
             ->setLength(190) // MySQL 5.6 only supports 191 characters on an indexed column in utf8mb4 mode
             ->setNotnull(true);
+        $table->addColumn('unique_key', Types::STRING)
+            ->setLength(190) // MySQL 5.6 only supports 191 characters on an indexed column in utf8mb4 mode
+            ->setNotnull(false);
         $table->addColumn('created_at', Types::DATETIME_IMMUTABLE)
             ->setNotnull(true);
         $table->addColumn('available_at', Types::DATETIME_IMMUTABLE)
@@ -525,8 +566,10 @@ class Connection implements ResetInterface
             ->setNotnull(false);
         $table->setPrimaryKey(['id']);
         $table->addIndex(['queue_name']);
+        $table->addIndex(['unique_key']);
         $table->addIndex(['available_at']);
         $table->addIndex(['delivered_at']);
+        $table->addUniqueConstraint(['queue_name', 'unique_key']);
     }
 
     private function decodeEnvelopeHeaders(array $doctrineEnvelope): array
