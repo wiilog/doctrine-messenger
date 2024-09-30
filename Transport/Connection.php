@@ -145,7 +145,6 @@ class Connection implements ResetInterface
             'body' => '?',
             'headers' => '?',
             'queue_name' => '?',
-            'unique_id' => '?',
             'created_at' => '?',
             'available_at' => '?',
         ];
@@ -569,7 +568,7 @@ class Connection implements ResetInterface
         $table->addIndex(['unique_key']);
         $table->addIndex(['available_at']);
         $table->addIndex(['delivered_at']);
-        $table->addUniqueConstraint(['queue_name', 'unique_key']);
+        $table->addUniqueConstraint(['queue_name', 'unique_key', 'delivered_at']);
     }
 
     private function decodeEnvelopeHeaders(array $doctrineEnvelope): array
