@@ -47,7 +47,7 @@ class DoctrineReceiverTest extends TestCase
         $this->assertCount(1, $actualEnvelopes);
         /** @var Envelope $actualEnvelope */
         $actualEnvelope = $actualEnvelopes[0];
-        $this->assertEquals(new DummyMessage('Hi'), $actualEnvelopes[0]->getMessage());
+        $this->assertEquals(new DummyMessage('Hi'), $actualEnvelope->getMessage());
 
         /** @var DoctrineReceivedStamp $doctrineReceivedStamp */
         $doctrineReceivedStamp = $actualEnvelope->last(DoctrineReceivedStamp::class);
