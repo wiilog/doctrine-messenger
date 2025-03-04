@@ -54,6 +54,11 @@ class Connection implements ResetInterface
         'unique_messages' => false,
     ];
 
+    protected const AVAILABLE_UNIQUE_MESSAGES_MODE = [
+        "waiting_queue",
+        "queue"
+    ];
+
     private const ORACLE_SEQUENCES_SUFFIX = '_seq';
 
     /**
@@ -107,7 +112,13 @@ class Connection implements ResetInterface
         $configuration += $query + $options + static::DEFAULT_OPTIONS;
 
         $configuration['auto_setup'] = filter_var($configuration['auto_setup'], \FILTER_VALIDATE_BOOL);
-        $configuration['unique_messages'] = filter_var($configuration['unique_messages'], \FILTER_VALIDATE_BOOL);
+
+        $uniqueMessagesActivated = filter_var($configuration['unique_messages'], \FILTER_VALIDATE_BOOL);
+        if ($uniqueMessagesActivated) {
+            if (!in_array($configuration['unique_messages'], static::AVAILABLE_UNIQUE_MESSAGES_MODE)) {
+                throw new InvalidArgumentException(sprintf('Invalid unique_messages option value: [%s]. Allowed options are [%s].', $configuration['unique_messages'], implode(', ', array_keys(static::AVAILABLE_UNIQUE_MESSAGES_MODE))));
+            }
+        }
 
         $configuration['table_name'] = self::getTableName($query, $options, $configuration['unique_messages']);
 
@@ -128,15 +139,20 @@ class Connection implements ResetInterface
 
     /**
      * @param int $delay The delay in milliseconds
+     * @param array{unique_key?: string|null, in_waiting_queue?: bool} $options
      *
      * @return string The inserted id
      *
      * @throws DBALException
      */
-    public function send(string $body, array $headers, int $delay = 0, string $uniqueKey = null): ?string
+    public function send(string $body, array $headers, int $delay = 0, array $options = []): ?string
     {
+
+        $uniqueKey = $options['unique_key'] ?? null;
+        $inWaitingQueue = $options['in_waiting_queue'] ?? false;
+
         if (!isset($uniqueKey)
-            && $this->configuration['unique_messages'] === true) {
+            && $this->configuration['unique_messages']) {
             throw new TransportException('No unique key given while the unique_messages option is set to true.');
         }
 
@@ -151,10 +167,12 @@ class Connection implements ResetInterface
             'available_at' => '?',
         ];
 
+        $queueSuffix = $inWaitingQueue ? "_waiting" : '';
+
         $parameters = [
             $body,
             json_encode($headers),
-            $this->configuration['queue_name'],
+            $this->configuration['queue_name'] . $queueSuffix,
             $now,
             $availableAt,
         ];
@@ -177,7 +195,7 @@ class Connection implements ResetInterface
             ->insert($this->configuration['table_name'])
             ->values($values);
 
-        return $this->executeInsert($queryBuilder->getSQL(), $parameters, $types);
+        return $this->executeInsert($queryBuilder->getSQL(), $parameters, $types, $inWaitingQueue);
     }
 
     private static function getTableName(array $query,
@@ -485,7 +503,7 @@ class Connection implements ResetInterface
         return $stmt;
     }
 
-    private function executeInsert(string $sql, array $parameters = [], array $types = []): ?string
+    private function executeInsert(string $sql, array $parameters = [], array $types = [], bool $silentWaitingException = false): ?string
     {
         // Use PostgreSQL RETURNING clause instead of lastInsertId() to get the
         // inserted id in one operation instead of two.
@@ -536,6 +554,15 @@ class Connection implements ResetInterface
             }
             else if ($e instanceof DBALException\UniqueConstraintViolationException
                 && $this->configuration['unique_messages']) {
+
+                $uniqueMessageMode = $this->configuration['unique_messages'];
+
+                if ($uniqueMessageMode === "waiting_queue"
+                    && !$silentWaitingException) {
+                    throw new ShouldWaitException("Should wait.");
+                }
+
+                // else ignoring
                 return null;
             }
 
@@ -582,7 +609,10 @@ class Connection implements ResetInterface
         $table->addIndex(['unique_key']);
         $table->addIndex(['available_at']);
         $table->addIndex(['delivered_at']);
-        $table->addUniqueConstraint(['queue_name', 'unique_key', 'delivered_at']);
+
+        if ($this->configuration["unique_messages"]) {
+            $table->addUniqueIndex(['queue_name', 'unique_key'], 'UNIQ_WIILOG_MESSAGE_IN_QUEUE');
+        }
 
         // We need to create a sequence for Oracle and set the id column to get the correct nextval
         if ($this->driverConnection->getDatabasePlatform() instanceof OraclePlatform) {

@@ -46,10 +46,26 @@ class DoctrineSender implements SenderInterface
         /** @var DelayStamp|null $delayStamp */
         $delayStamp = $envelope->last(DelayStamp::class);
 
-        $delay = null !== $delayStamp ? $delayStamp->getDelay() : 0;
+        $delay = null !== $delayStamp
+            ? $delayStamp->getDelay()
+            : 0;
+
+        $body = $encodedMessage['body'];
+        $header = $encodedMessage['headers'];
 
         try {
-            $id = $this->connection->send($encodedMessage['body'], $encodedMessage['headers'] ?? [], $delay, $uniqueKey);
+            try {
+                $id = $this->connection->send($body, $header, $delay, [
+                    "unique_key" => $uniqueKey,
+                ]);
+            } catch (ShouldWaitException) {
+                if ($message instanceof UniqueWaitingMessage) {
+                    $id = $this->connection->send($body, $header, $delay, [
+                        "unique_key" => $uniqueKey . "_" . $message->getWaitingTimes(),
+                        "in_waiting_queue" => true,
+                    ]);
+                }
+            }
         } catch (DBALException $exception) {
             throw new TransportException($exception->getMessage(), 0, $exception);
         }
