@@ -51,16 +51,16 @@ class DoctrineSender implements SenderInterface
             : 0;
 
         $body = $encodedMessage['body'];
-        $header = $encodedMessage['headers'];
+        $headers = $encodedMessage['headers'] ?? [];
 
         try {
             try {
-                $id = $this->connection->send($body, $header, $delay, [
+                $id = $this->connection->send($body, $headers, $delay, [
                     "unique_key" => $uniqueKey,
                 ]);
             } catch (ShouldWaitException) {
                 if ($message instanceof UniqueWaitingMessage) {
-                    $id = $this->connection->send($body, $header, $delay, [
+                    $id = $this->connection->send($body, $headers, $delay, [
                         "unique_key" => $uniqueKey . "_" . $message->getWaitingTimes(),
                         "in_waiting_queue" => true,
                     ]);
